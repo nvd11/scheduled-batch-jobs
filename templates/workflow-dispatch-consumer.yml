@@ -1,0 +1,137 @@
+# 消费者 workflow 模板 —— 复制到执行仓库的 .github/workflows/ 后改名填空。
+#
+# 定位：本文件只负责"把活派给内网 k3s 并跟单"，不承载业务逻辑。
+# 业务逻辑在镜像里（Job 模板），这样才能在集群里手动重跑同一份代码。
+#
+# 需要替换的占位符：<JOB_NAME> <JOB_TEMPLATE> <IMAGE 相关> <POL>
+# 需要的仓库 secrets（名称固定，值不入库）：
+#   K3S_SSH_HOST / K3S_SSH_USER / K3S_SSH_PRIVATE_KEY
+#
+# 关于 SSH vs ServiceAccount token 的取舍见 docs/ARCHITECTURE.md §⑥ 已知薄弱点。
+
+name: Scheduled Job - <JOB_NAME>
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (report what would change, change nothing)'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+      retention_days:
+        description: 'Business parameter example'
+        required: false
+        default: '7'
+        type: string
+
+# 同一任务不允许并发：后来者排队，不要取消在跑的（批处理被中途砍掉更糟）
+concurrency:
+  group: scheduled-<JOB_NAME>
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch and follow up
+    runs-on: ubuntu-latest
+    timeout-minutes: 30            # 必须显式写死
+
+    env:
+      SSH_HOST: ${{ secrets.K3S_SSH_HOST }}
+      SSH_USER: ${{ secrets.K3S_SSH_USER }}
+      SSH_KEY: ${{ secrets.K3S_SSH_PRIVATE_KEY }}
+      NAMESPACE: batch-jobs
+      JOB_TEMPLATE: <JOB_TEMPLATE>
+      DRY_RUN: ${{ inputs.dry_run || 'true' }}
+      RETENTION_DAYS: ${{ inputs.retention_days || '7' }}
+
+    steps:
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          # ControlMaster 复用连接：轮询阶段会建立几十次连接，不复用会被 sshd 限速
+          cat >> ~/.ssh/config <<'EOF'
+          Host k3s
+            HostName __HOST__
+            User __USER__
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ControlMaster auto
+            ControlPath ~/.ssh/cm-%r@%h:%p
+            ControlPersist 10m
+            ServerAliveInterval 15
+          EOF
+          sed -i "s/__HOST__/${SSH_HOST}/; s/__USER__/${SSH_USER}/" ~/.ssh/config
+          ssh-keyscan -T 10 "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Run remote command (with retries)
+        id: dispatch
+        run: |
+          set -euo pipefail
+          run_ssh() {
+            local attempt
+            for attempt in 1 2 3; do
+              if ssh -o BatchMode=yes -o ConnectTimeout=15 k3s "$@"; then return 0; fi
+              echo "::warning::ssh attempt ${attempt} failed, retrying..."
+              sleep 5
+            done
+            return 1
+          }
+
+          JOB_NAME="<JOB_NAME>-${DRY_RUN}-$(date -u +%Y%m%d%H%M%S)"
+          echo "job_name=${JOB_NAME}" >> "$GITHUB_OUTPUT"
+
+          # 从 CronJob 模板派生 Job，注入本次参数
+          run_ssh "sudo kubectl create job --from=cronjob/${JOB_TEMPLATE} ${JOB_NAME} -n ${NAMESPACE} --dry-run=client -o json" \
+            | jq --arg dr "$DRY_RUN" --arg rd "$RETENTION_DAYS" '
+                .spec.backoffLimit = 1
+                | .spec.activeDeadlineSeconds = 1200
+                | .spec.template.spec.containers[0].env += [
+                    {"name":"DRY_RUN","value":$dr},
+                    {"name":"RETENTION_DAYS","value":$rd}
+                  ]
+              ' > /tmp/job.json
+
+          run_ssh "sudo kubectl apply -f -" < /tmp/job.json
+
+      - name: Poll until finished
+        run: |
+          set -euo pipefail
+          JOB="${{ steps.dispatch.outputs.job_name }}"
+          for i in $(seq 1 240); do          # 240 * 5s = 20min，与 activeDeadlineSeconds 对齐
+            S=$(ssh -o BatchMode=yes k3s "sudo kubectl get job ${JOB} -n ${NAMESPACE} -o jsonpath='{.status.succeeded}{\"/\"}{.status.failed}' || true")
+            case "$S" in
+              1/*) echo "job succeeded"; exit 0 ;;
+              0/[1-9]*) echo "::error::job failed ($S)"; exit 1 ;;
+            esac
+            sleep 5
+          done
+          echo "::error::timeout waiting for job ${JOB} (pipeline likely blocked on a precondition)"
+          ssh -o BatchMode=yes k3s "sudo kubectl describe job ${JOB} -n ${NAMESPACE} || true"
+          exit 1
+
+      - name: Collect logs
+        if: always()
+        run: |
+          set -euo pipefail
+          JOB="${{ steps.dispatch.outputs.job_name }}"
+          LOGS=$(ssh -o BatchMode=yes k3s "sudo kubectl logs -n ${NAMESPACE} -l job-name=${JOB} --tail=2000 || true")
+          {
+            echo "### Logs ($JOB)"
+            echo '```'
+            echo "$LOGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 业务级失败必须抬成 workflow 失败：只看退出码会漏掉"跑完了但结果是错的"
+          if printf '%s' "$LOGS" | grep -q '\[ALERT\]'; then
+            echo "::error::business alert detected in job logs"
+            exit 1
+          fi
