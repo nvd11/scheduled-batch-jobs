@@ -70,31 +70,37 @@ AWS EventBridge Scheduler  cron(20 4 * * ? *)  Asia/Shanghai
   └─> Rule: source=custom.cctv, detail-type=prune-daily
         └─> API Destination: github dispatches (reuse Connection github-api-conn)
               └─> GitHub Actions: .github/workflows/prune-cctv.yml
-                    └─> SSH 到 k3s 控制面 → kubectl create job --from=cronjob/cctv-prune -n batch-jobs
-                          └─> pod on nuc → HTTP 调 AList(10.0.1.227:5244) → 夸克
+                    └─> SSH 到 k3s 控制面 → kubectl create job --from=cronjob/cctv-prune -n cctv-system
+                          └─> pod on radxa → HTTP 调 AList(10.0.1.227:5244) → 夸克
 ```
 
 **为什么是 k3s Job 而不是 systemd timer**：时钟留在 AWS（本仓铁律）、日志进 GitHub Step Summary、执行体在内网能直连 AList。轮询与失败可见性都由 workflow 负责。
 
 **为什么不在 GitHub runner 直连夸克**：要把 Cookie 复制一份到 GitHub Secrets，等于第二处真相，且 Cookie 轮换会静默断掉。
 
-### 5.1 出口 IP 约束（2026-11-24 实测）
+**为什么落在 `cctv-system` 而不是 `batch-jobs`**：该命名空间已有 `cctv-vault-store`（指向 `shared-secrets-vault`），可直接复用，无需再复制 OCI 认证私钥。CCTV 相关的采集/上传/清理同处一个域，也便于统一授权与排查。
+
+**配置归谁管（A 方案，已确认）**：ArgoCD 只管「跑什么容器」（CronJob 模板，永久 `suspend`）；AWS Scheduler + GitHub Actions 管「什么时候跑、传什么参数」。运行时通过 `kubectl create job --from=cronjob/cctv-prune` 派生，派生 Job 不进 ArgoCD。
+
+### 5.1 出口 IP 约束（2026-11-25 修正）
 
 夸克对“异地登录”很敏感，所以执行体落点不是性能问题，是**出口 IP 问题**。
 
-| 主机 | 直连出口 IP |
-|---|---|
-| Starfive `10.0.1.227`（AList 所在） | `223.73.61.33`（广东 广州 移动） |
-| NUC `10.0.1.113`（pod 落点） | `223.73.61.33` ← 完全相同 |
-| NixOS `10.0.1.3` | `223.73.61.33` |
+**关键修正：出口 IP 取决于「是否走代理」，不是「机器在哪个网段」。**
 
-且 AList 的 systemd 环境里带 `NO_PROXY=...quark.cn,.quark.cn` —— **访问夸克走直连，不经过 mihomo**（mihomo 的代理出口是 `129.221.158.123`，那是另一条路）。
+| 主机 | 直连出口 | 走代理出口 |
+|---|---|---|
+| Starfive `10.0.1.227`（AList 所在） | `223.73.61.33`（广东 广州 移动） | `129.221.158.123`（新加坡 OCI） |
+| NUC `10.0.1.113` | `223.73.61.33` | — |
+| **radxa `10.0.1.22`（本任务落点）** | `223.73.61.33` | `129.221.158.123` |
+| NixOS `10.0.1.3` | `223.73.61.33` | — |
+
+radxa 的 `/etc/environment` 里设了 `http_proxy=http://10.0.1.227:7890`，但 `NO_PROXY` 含 `.quark.cn`，所以**访问夸克自动直连**（实测走的是 `223.73.61.33`）。**pod 不继承宿主的环境变量**（节点上没有 TUN 透明代理），默认就是直连。
 
 结论：
 
-- 只要在 `10.0.1.0/24` 内且**不走代理**，Quark 看到的出口就是同一个 IP → **k3s Job 落 nuc 与 AList 行为一致，不需要为了 IP 把任务搬到星光板**。
-- pod 必须用 `nodeSelector: kubernetes.io/hostname: nuc` **钉死**。
-- pod 内**禁止注入 `HTTP_PROXY` / `HTTPS_PROXY`**（继承代理后出口变成 OCI 的 IP，等于异地登录）。
+- 执行体必须 `nodeSelector: kubernetes.io/hostname: radxa-cubie-a7a` **钉死**（与 CCTV 采集/上传同机，直连出口与 AList 一致）。
+- pod 内**禁止注入 `HTTP_PROXY` / `HTTPS_PROXY`**；若确需注入，`NO_PROXY` 必须包含 `quark.cn`。
 - **绝不允许**调度到 free-arm-vm / 腾讯云 CP / 任何云节点：出口是云厂商 IP。
 
 ### 5.2 集群已有的 OCI Vault 集成（直接复用，不另造）
@@ -137,11 +143,42 @@ ExternalSecret（refreshInterval: 1h）
 | 凭据 | 存放位置 | 用途 |
 |---|---|---|
 | AList 管理员账号 `alist-admin-credentials` | OCI Vault `shared-secrets-vault`（ap-singapore-1） | **仅供运维**取 Cookie / 排查；**禁止注入 Job** |
-| `cctv-pruner` 密码（待建） | OCI Vault `shared-secrets-vault` → ESO → k8s Secret | Job 运行时使用 |
-| 夸克 Cookie | **不入 Vault** | 分钟级轮换，快照必然过期；运行时在星光板本地现取（见 §6.5） |
+| `cctv-pruner` 密码 `cctv-pruner-alist-password` | OCI Vault `shared-secrets-vault` → ESO → `cctv-system/cctv-pruner-secrets` | ✅ 已入库（2026-11-25），Job 运行时使用 |
+| 夸克 Cookie | **不入 Vault**；两个 Vault 里的旧快照已预约 2026-11-26 删除 | 分钟级轮换，快照必然过期；运行时在星光板本地现取（见 §6.5） |
 | 加密密钥 | `shared-secrets-vault` 的 `litellm-secrets-key`（HSM） | 复用现有密钥，不新建 |
 
 ⚠️ OCI Vault 运维注意（实测）：secret 删除是**预约制**（最短 1 天），期间同名不可重建；更新内容时 `secretContent.name` **不能与已有版本重名**，否则返回 `name already exists`；OCI CLI 的 `ServiceError` 不是 JSON，`jq` 会解析失败——先看原始输出再管道。
+
+#### 6.1.1 `cctv-pruner` 的创建配方（2026-11-25 实测通过）
+
+这台 AList **只有 `guest` / `admin` 两个内置角色，且都不允许分配**，必须先建自定义角色：
+
+```bash
+# 1) 建角色（permission_scopes 是数组）
+POST /api/admin/role/create
+{"name":"cctv-pruner","description":"CCTV 清理专用","default":false,
+ "permission_scopes":[{"path":"/Quark/CCTV_Records","permission":136}]}
+
+# 2) 建用户
+POST /api/admin/user/create
+{"username":"cctv-pruner","password":"<24位随机>",
+ "base_path":"/Quark/CCTV_Records","role":[3],"permission":136,"disabled":false}
+```
+
+权限位（源码 `internal/model/user.go` 确认）：`1`=SeeHidden、`2`=AccessWithoutPassword、`4`=OfflineDownload、`8`=Write、`16`=Rename、`32`=Move、`64`=Copy、**`128`=Remove**、`256`=WebdavRead、`512`=WebdavManage。
+
+**最终取 `136` = Remove(128) + Write(8)**。为什么要 Write：`fs/list` 带 `refresh=true` 时 AList 要求 Write 权限（否则报 `Refresh without permission`），而我们的删除后回查必须绕缓存，否则会读到旧列表、误报失败。
+
+四个实测坑：
+
+| 坑 | 现象 | 解法 |
+|---|---|---|
+| `role:[]` | `admin or guest user can not be created` | 显式给 `role:[<自定义角色id>]` |
+| `user/update` 是**整条覆盖** | 只传 role → `base_path` 变 `/`、`permission` 变 0 | 更新时必须带全 `base_path` / `permission` / `role` |
+| 设了 `base_path` 后路径解析不一致 | `/` 能列，`/<子目录>` 被拒（`password is incorrect or you have no permission`） | **子路径一律写绝对路径**（`/Quark/CCTV_Records/锦绣世家_客厅`） |
+| `refresh=true` | `Refresh without permission` | 权限位补 `8` |
+
+安全验证（已通过）：`base_path` 外的 `/Quark/movie` 列表返回 403、删除返回 403 且文件完好。
 
 ### 6.2 参数（env）
 
@@ -226,12 +263,24 @@ ExternalSecret（refreshInterval: 1h）
 | 项 | 值 |
 |---|---|
 | workflow 文件 | `prune-cctv.yml` |
+| 所在仓库 | `my-argocd-manifests`（与 k8s 清单同仓，改动一处提交即可） |
 | `on.workflow_dispatch.inputs` | `dry_run`(choice true/false)、`retention_days`(string, default `7`) |
 | `concurrency.group` | `scheduled-cctv-prune`，`cancel-in-progress: false` |
 | `timeout-minutes` | `20` |
-| Job `activeDeadlineSeconds` | `1200` |
+| 派生命令 | `kubectl create job --from=cronjob/cctv-prune <name> -n cctv-system` |
+| Job `activeDeadlineSeconds` | `900`（与 CronJob 模板一致） |
+| 注入的 env | `DRY_RUN` / `RETENTION_DAYS`（覆盖模板默认值，模板默认 `DRY_RUN=true`） |
 | 失败判定 | pod 退出码非 0 **或** 日志出现 `[ALERT]` |
 | 归档 | Step Summary 贴删除清单表 + 末尾 2000 行日志 |
+
+### 7.1 GitOps 清单（已编写，待推送）
+
+| 文件 | 作用 |
+|---|---|
+| `my-argocd-manifests/infrastructure/cctv/externalsecret-pruner.yaml` | ExternalSecret：Vault `cctv-pruner-alist-password` → `cctv-system/cctv-pruner-secrets`（key `ALIST_PASSWORD`，1h 刷新） |
+| `my-argocd-manifests/argocd-apps/cctv-prune-app.yaml` | Application：`generic-batch-job` chart → CronJob `cctv-prune`（`suspend: true`、钉 radxa、50m/64Mi→200m/128Mi） |
+
+镜像名先占位 `ghcr.io/nvd11/cctv-pruner:v0.1.0`（CronJob 挂起状态不会拉取，构建完成后再改 tag）。
 
 ---
 
@@ -288,12 +337,17 @@ DRY_RUN=0 ./scripts/register-schedule.sh \
 
 ## 11. 待办与开放问题
 
-| # | 事项 | 归属 |
+| # | 事项 | 归属 / 状态 |
 |---|---|---|
-| 1 | 建 AList 专用用户 `cctv-pruner`（只给 `/Quark/CCTV_Records` 删除权限） | 需主人批准（改 AList 配置） |
-| 2 | 确定 workflow + k8s 清单落哪个仓（建议 `my-argocd-manifests`） | 待主人拍板 |
-| 3 | ~~`recycle/remove` 的 body 形状~~ → **已实测**：`{"select_mode":1}`，同步 `finish:true`（见 `QUARK-API-NOTES.md`） | ✅ 完成 |
+| 1 | ~~建 AList 专用用户 `cctv-pruner`~~ | ✅ 完成（角色 id=3，perm=136，base_path 已锁，越权测试通过） |
+| 2 | ~~确定 workflow + k8s 清单落哪个仓~~ | ✅ `my-argocd-manifests`（Application 模式 A） |
+| 3 | ~~`recycle/remove` 的 body 形状~~ | ✅ 已实测：`{"select_mode":1}`，同步 `finish:true` |
 | 4 | 是否把 `CCTV_Records` 下其他场景目录（如未来的 `_卧室`）纳入同一 job | 出现时再扩 |
 | 5 | 是否加“容量水位告警”（>N GB 时 Discord 提醒） | 可选增强 |
+| 6 | 探测夸克是否有“彻底删除/跳过回收站”参数（路线 C）；若有，任务二可取消 | 待验证 |
+| 7 | 任务二 `quark-recycle-purge-weekly` 上线时间 | 任务一稳定两周后 |
+| 8 | 构建镜像 `ghcr.io/nvd11/cctv-pruner`（**必须 arm64**）+ workflow `prune-cctv.yml` | ⏭ 下一步 |
+| 9 | AWS 侧接线：API Destination / Rule / Schedule | ⏭ 待镜像就绪 |
+| 10 | 排查 `default/oci-vault-store` 曾报 `InvalidProviderConfig`、`scheduler-backend` 在 radxa 上 CrashLoopBackOff 1367 次 | 独立问题，另行处理 |
 | 6 | **探测夸克是否有“彻底删除/跳过回收站”参数**（路线 C）；若有，任务二可取消 | 待验证 |
 | 7 | 任务二 `quark-recycle-purge-weekly` 上线时间 | 任务一稳定两周后 |
