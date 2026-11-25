@@ -1,0 +1,122 @@
+# 构建 cctv-pruner 镜像（linux/arm64，供 radxa-cubie-a7a 使用）
+#
+# 约定沿用 cctv-collector 仓库的两个构建 workflow：
+#   - 原生 ARM runner（ubuntu-24.04-arm），不用 QEMU 模拟
+#   - 标签策略 latest / sha-<long> / v*
+name: Build CCTV Pruner Image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "jobs/cctv-pruner/**"
+      - ".github/workflows/build-cctv-pruner.yml"
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: nvd11/cctv-pruner
+
+jobs:
+  lint:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile check
+        run: python3 -m py_compile jobs/cctv-pruner/pruner.py
+      - name: Run unit tests
+        run: cd jobs/cctv-pruner && python3 -m unittest discover -s tests -v
+
+  build-and-push:
+    name: Native Build & Push (ARM64)
+    runs-on: ubuntu-24.04-arm
+    needs: lint
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long,prefix=sha-
+            type=ref,event=tag
+
+      - name: Build and push native image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: jobs/cctv-pruner
+          file: jobs/cctv-pruner/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+
+      - name: Record manifest digest
+        run: |
+          {
+            echo '### CCTV Pruner Build Summary'
+            echo '- Image: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}`'
+            echo '- Platform: `linux/arm64`'
+            echo '- Manifest digest: `${{ steps.build.outputs.digest }}`'
+            echo '- Commit: `${{ github.sha }}`'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # CD：把新 digest 回写给 my-argocd-manifests，由 ArgoCD 自动同步
+      # 与 cctv-collector 的两个构建 workflow 使用同一套机制：
+      #   repository_dispatch(update-app-image-digest) → 修改 argocd-apps/cctv-prune-app.yaml 的 digest 行
+      - name: Update GitOps image digest
+        if: ${{ vars.ENABLE_GITOPS_DIGEST_DISPATCH == 'true' }}
+        env:
+          DISPATCH_TOKEN: ${{ secrets.ARGOCD_MANIFESTS_DISPATCH_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$DISPATCH_TOKEN" ]]; then
+            echo "ARGOCD_MANIFESTS_DISPATCH_TOKEN is required when GitOps dispatch is enabled" >&2
+            exit 1
+          fi
+          if [[ ! "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "Unexpected manifest digest format: $IMAGE_DIGEST" >&2
+            exit 1
+          fi
+
+          response_file="$(mktemp)"
+          http_status="$(curl --silent --show-error --output "$response_file" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --url https://api.github.com/repos/nvd11/my-argocd-manifests/dispatches \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $DISPATCH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --data "$(jq -n \
+              --arg digest "$IMAGE_DIGEST" \
+              '{event_type:"update-app-image-digest",client_payload:{svc_name:"cctv-prune",image_digest:$digest}}')")"
+
+          echo "GitOps dispatch HTTP status: $http_status"
+          echo "GitOps digest: $IMAGE_DIGEST"
+          if [[ "$http_status" != "204" ]]; then
+            cat "$response_file" >&2
+            exit 1
+          fi

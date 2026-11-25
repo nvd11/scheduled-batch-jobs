@@ -256,24 +256,35 @@ POST /api/admin/user/create
 
 ---
 
-## 7. 编排层（GitHub Actions）
+## 7. 编排层与实现代码（全部在本仓）
 
-复制 `templates/workflow-dispatch-consumer.yml`，本任务的差异点：
+**代码、镜像构建、派发三者同仓**，改一处提交就能同时看到：
+
+| 组成 | 路径 | 说明 |
+|---|---|---|
+| 清理程序 | `jobs/cctv-pruner/pruner.py` | 222 行，仅标准库；见 §7.2 |
+| 镜像定义 | `jobs/cctv-pruner/Dockerfile` | `python:3.12-slim`，非 root，`linux/arm64` |
+| 镜像构建 | `.github/workflows/build-cctv-pruner.yml` | 原生 ARM runner（`ubuntu-24.04-arm`），推 `ghcr.io/nvd11/cctv-pruner` |
+| 派发编排 | `.github/workflows/prune-cctv.yml` | `workflow_dispatch` → 派生 Job → 跟单 → Step Summary |
+
+派发 workflow 的关键点：
 
 | 项 | 值 |
 |---|---|
-| workflow 文件 | `prune-cctv.yml` |
-| 所在仓库 | `my-argocd-manifests`（与 k8s 清单同仓，改动一处提交即可） |
-| `on.workflow_dispatch.inputs` | `dry_run`(choice true/false)、`retention_days`(string, default `7`) |
+| `on.workflow_dispatch.inputs` | `dry_run`(choice true/false, 默认 true)、`retention_days`(string, 默认 `7`) |
 | `concurrency.group` | `scheduled-cctv-prune`，`cancel-in-progress: false` |
 | `timeout-minutes` | `20` |
 | 派生命令 | `kubectl create job --from=cronjob/cctv-prune <name> -n cctv-system` |
-| Job `activeDeadlineSeconds` | `900`（与 CronJob 模板一致） |
-| 注入的 env | `DRY_RUN` / `RETENTION_DAYS`（覆盖模板默认值，模板默认 `DRY_RUN=true`） |
+| 注入的 env | `DRY_RUN` / `RETENTION_DAYS`（jq 去重后覆盖模板默认值） |
+| 轮询上限 | 150 × 5s ≈ 12.5 分钟（小于 `activeDeadlineSeconds` 900s） |
+| 快速失败 | Job 曾出现后连续 6 次查不到 → 判失败（崩溃后被 TTL 清理） |
 | 失败判定 | pod 退出码非 0 **或** 日志出现 `[ALERT]` |
-| 归档 | Step Summary 贴删除清单表 + 末尾 2000 行日志 |
+| 归档 | Step Summary 贴清单表 + 末尾 2000 行日志 |
 
-### 7.1 GitOps 清单（已编写，待推送）
+⚠️ **本仓需要新增 3 个 secrets**（`sms-flink-etl` 里已有，但仓库级 secrets 不共享）：
+`K3S_SSH_HOST` / `K3S_SSH_USER` / `K3S_SSH_PRIVATE_KEY`
+
+### 7.1 GitOps 清单（已推送并生效）
 
 | 文件 | 作用 |
 |---|---|
@@ -281,6 +292,35 @@ POST /api/admin/user/create
 | `my-argocd-manifests/argocd-apps/cctv-prune-app.yaml` | Application：`generic-batch-job` chart → CronJob `cctv-prune`（`suspend: true`、钉 radxa、50m/64Mi→200m/128Mi） |
 
 镜像名先占位 `ghcr.io/nvd11/cctv-pruner:v0.1.0`（CronJob 挂起状态不会拉取，构建完成后再改 tag）。
+
+> `argocd-apps/` 目录由 app-of-apps `root-bootstrap` 纳管，**只要 push 就会自动创建 Application**，无需手工 `kubectl apply`。
+
+### 7.2 清理程序（`jobs/cctv-pruner/pruner.py`）
+
+| 项 | 说明 |
+|---|---|
+| 依赖 | **仅 Python 标准库**（`urllib`），零第三方包，无供应链面 |
+| 时区 | 硬编码 `+08:00`（中国无夏令时），不依赖容器 tzdata |
+| 环境变量 | `ALIST_URL` / `ALIST_USERNAME` / `ALIST_PASSWORD` / `TARGET_PATH` / `RETENTION_DAYS` / `DRY_RUN` / `MAX_DELETE_DIRS` / `FORCE_NOW`（测试用） |
+| 守卫 1 | `TARGET_PATH` 必须与内置预期值**逐字一致** |
+| 守卫 2 | 日期目录数必须在 **1~90** 之间，否则中止 |
+| 守卫 3 | 断言“今天”永不在删除集内 |
+| 守卫 4 | 待删目录数 > `MAX_DELETE_DIRS`（默认 40）即中止 |
+| 缓存处理 | 先 `refresh=true`；无权限时降级为缓存列表并打告警（不静默） |
+| 删除 | `POST /api/fs/remove`，**一次调用传全部日期名** |
+| 回查 | 删除后重列目录，断言待删目录全部消失 |
+| 失败 | 统一打印 `[ALERT]` 并 `exit 1` |
+| 测试 | `tests/test_pruner.py`：**21 个用例，纯内存无网络**；CI 在构建镜像前必跑，红了就不出镜像 |
+
+**本地实测（2026-11-25，`DRY_RUN=true` 连生产 AList）**：
+
+```
+✅ AList 登录成功（用户 cctv-pruner）
+发现 41 个日期目录
+cutoff=2026-11-19（保留 11-19 … 11-25）  待删 34 天
+合计 3133 文件 / 420.93 GB
+[DRY_RUN] 本次未做任何改动
+```
 
 ---
 
@@ -346,8 +386,11 @@ DRY_RUN=0 ./scripts/register-schedule.sh \
 | 5 | 是否加“容量水位告警”（>N GB 时 Discord 提醒） | 可选增强 |
 | 6 | 探测夸克是否有“彻底删除/跳过回收站”参数（路线 C）；若有，任务二可取消 | 待验证 |
 | 7 | 任务二 `quark-recycle-purge-weekly` 上线时间 | 任务一稳定两周后 |
-| 8 | 构建镜像 `ghcr.io/nvd11/cctv-pruner`（**必须 arm64**）+ workflow `prune-cctv.yml` | ⏭ 下一步 |
-| 9 | AWS 侧接线：API Destination / Rule / Schedule | ⏭ 待镜像就绪 |
+| 8 | ~~构建镜像 `ghcr.io/nvd11/cctv-pruner` + workflow~~ | ✅ 代码与 workflow 已写（`jobs/cctv-pruner/`），待 push 触发构建 |
+| 9 | 本仓新增 secrets `K3S_SSH_HOST` / `K3S_SSH_USER` / `K3S_SSH_PRIVATE_KEY` | ⏭ 待配置 |
+| 10 | push 后把 Application 的镜像 tag 从 `v0.1.0` 换成实际 digest | ⏭ 待构建完成 |
+| 11 | 手工派生 `DRY_RUN=true` 的 Job，在真实集群验证一轮 | ⏭ 待镜像 |
+| 12 | AWS 侧接线：API Destination / Rule / Schedule | ⏭ 待验证通过 |
 | 10 | 排查 `default/oci-vault-store` 曾报 `InvalidProviderConfig`、`scheduler-backend` 在 radxa 上 CrashLoopBackOff 1367 次 | 独立问题，另行处理 |
 | 6 | **探测夸克是否有“彻底删除/跳过回收站”参数**（路线 C）；若有，任务二可取消 | 待验证 |
 | 7 | 任务二 `quark-recycle-purge-weekly` 上线时间 | 任务一稳定两周后 |

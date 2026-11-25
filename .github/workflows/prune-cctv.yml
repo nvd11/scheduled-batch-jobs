@@ -1,0 +1,129 @@
+# 派发 cctv-prune：从挂起的 CronJob 模板派生一个真实 Job，并跟单到结束。
+#
+# 定位：本 workflow 只管「什么时候跑 / 传什么参数 / 结果怎么呈现」。
+#       pod 的定义在 ArgoCD（argocd-apps/cctv-prune-app.yaml），不在这里重复。
+#
+# 需要仓库 secrets：K3S_SSH_HOST / K3S_SSH_USER / K3S_SSH_PRIVATE_KEY
+name: "CCTV Prune"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run（只打印清单，不删除）"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+      retention_days:
+        description: "保留天数（含今天）"
+        required: false
+        default: "7"
+        type: string
+
+concurrency:
+  group: scheduled-cctv-prune
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    name: Dispatch and follow up
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      SSH_HOST: ${{ secrets.K3S_SSH_HOST }}
+      SSH_USER: ${{ secrets.K3S_SSH_USER }}
+      SSH_KEY: ${{ secrets.K3S_SSH_PRIVATE_KEY }}
+      NAMESPACE: cctv-system
+      CRONJOB: cctv-prune
+      DRY_RUN: ${{ inputs.dry_run || 'true' }}
+      RETENTION_DAYS: ${{ inputs.retention_days || '7' }}
+
+    steps:
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          cat >> ~/.ssh/config <<EOF
+          Host k3s
+            HostName ${SSH_HOST}
+            User ${SSH_USER}
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ControlMaster auto
+            ControlPath ~/.ssh/cm-%r@%h:%p
+            ControlPersist 10m
+            ServerAliveInterval 15
+          EOF
+          trap 'ssh -O exit k3s 2>/dev/null || true' EXIT
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Create job from suspended template
+        id: dispatch
+        run: |
+          set -euo pipefail
+          JOB="cctv-prune-${DRY_RUN}-$(date -u +%Y%m%d%H%M%S)"
+          echo "job_name=${JOB}" >> "$GITHUB_OUTPUT"
+
+          # 从模板派生，注入本次参数（同名 env 先去重，避免重复条目）
+          ssh k3s "sudo kubectl create job --from=cronjob/${CRONJOB} ${JOB} -n ${NAMESPACE} --dry-run=client -o json" \
+            | jq --arg dr "$DRY_RUN" --arg rd "$RETENTION_DAYS" '
+                .spec.template.spec.containers[0].env =
+                  ((.spec.template.spec.containers[0].env // [])
+                   | map(select(.name != "DRY_RUN" and .name != "RETENTION_DAYS")))
+                  + [{"name":"DRY_RUN","value":$dr},
+                     {"name":"RETENTION_DAYS","value":$rd}]
+              ' > /tmp/job.json
+
+          ssh k3s "sudo kubectl apply -f -" < /tmp/job.json
+          echo "✅ 已派生 Job: ${JOB} (dry_run=${DRY_RUN}, retention=${RETENTION_DAYS}d)"
+
+      - name: Poll until finished
+        run: |
+          set -euo pipefail
+          JOB="${{ steps.dispatch.outputs.job_name }}"
+          seen=0; missing=0
+          for i in $(seq 1 150); do          # 150 × 5s ≈ 12.5 分钟，小于 activeDeadlineSeconds(900s)
+            S=$(ssh k3s "sudo kubectl get job ${JOB} -n ${NAMESPACE} -o jsonpath='{.status.succeeded}{\"/\"}{.status.failed}' 2>/dev/null || true")
+            case "$S" in
+              1/*) echo "🎉 Job ${JOB} 成功"; exit 0 ;;
+              0/[1-9]*) echo "::error::Job ${JOB} 失败 ($S)"; exit 1 ;;
+            esac
+            if [ -n "$S" ]; then seen=1; missing=0
+            elif [ "$seen" -eq 1 ]; then
+              missing=$((missing+1))
+              if [ "$missing" -ge 6 ]; then
+                echo "::error::Job ${JOB} 从集群消失（疑似崩溃后被 TTL 清理）"; exit 1
+              fi
+            fi
+            sleep 5
+          done
+          echo "::error::等待 Job ${JOB} 超时"
+          ssh k3s "sudo kubectl describe job ${JOB} -n ${NAMESPACE} || true"
+          exit 1
+
+      - name: Collect logs
+        if: always()
+        run: |
+          set -euo pipefail
+          JOB="${{ steps.dispatch.outputs.job_name }}"
+          LOGS=$(ssh k3s "sudo kubectl logs -n ${NAMESPACE} -l job-name=${JOB} --tail=2000 || true")
+          {
+            echo "### CCTV Prune 日志（${JOB}）"
+            echo '```text'
+            echo "$LOGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 业务级失败必须抬成 workflow 失败：只看退出码会漏掉"跑完了但结果不对"
+          if printf '%s' "$LOGS" | grep -qF '[ALERT]'; then
+            echo "::error::日志中出现业务告警标记 [ALERT]"
+            printf '%s\n' "$LOGS" | grep -F '[ALERT]' || true
+            exit 1
+          fi

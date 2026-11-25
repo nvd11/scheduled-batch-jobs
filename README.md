@@ -1,6 +1,12 @@
-# Scheduled Batch Jobs（个人定时批处理任务总账）
+# Scheduled Batch Jobs（个人定时批处理任务总账 + 执行体）
 
-本仓库是**所有周期性批处理任务的唯一登记处与架构说明书**。它不承载业务代码 —— 业务逻辑仍留在各自的执行仓库里（`sms-flink-etl`、`my-argocd-manifests`、后续新增仓库）。这里的产出是：**一张看得全的拓扑 + 一份对得上现实的清单 + 一套可复制的接线步骤**。
+本仓库是**周期性批处理任务的唯一登记处**，同时**承载自研任务的实现代码**（`jobs/`）。
+
+- **登记与说明**：拓扑、任务总账、接线步骤、实战笔记（`docs/`）
+- **执行体代码**：每个任务一个目录（`jobs/<name>/`），含程序、Dockerfile 与 README
+- **编排**：`Scheduler（AWS）→ GitHub Actions（.github/workflows）→ k8s CronJob 模板（ArgoCD）`
+
+> 第三方/历史业务（如 `sms-flink-etl`）的代码仍留在各自仓库，本仓只登记不复制。
 
 统一架构：
 
@@ -96,12 +102,27 @@ flowchart LR
 ├── docs/
 │   ├── ARCHITECTURE.md            # 逐跳细节：真实 ARN、payload、重试/失败语义、备选方案对比
 │   ├── INVENTORY.md               # 任务总账：每个 Schedule 的全部字段与排查入口
-│   └── RUNBOOK-add-a-job.md       # 新增一个定时任务的完整接线步骤
+│   ├── RUNBOOK-add-a-job.md       # 新增一个定时任务的完整接线步骤
+│   ├── JOB-cctv-prune.md          # CCTV 保留策略：设计、守卫、节奏、凭据
+│   ├── QUARK-API-NOTES.md         # 夸克 API / Cookie 机制的实测笔记
+│   └── CICD-STRATEGY.md           # CI/CD 与 GitOps 部署策略（构建→镜像→回写→同步）
+├── jobs/                          # 自研任务的实现（程序 + Dockerfile + README）
+│   └── cctv-pruner/
+│       ├── pruner.py              # 清理逻辑（仅标准库）
+│       ├── Dockerfile             # linux/arm64
+│       ├── README.md              # 环境变量与本地试跑
+│       └── tests/
+│           └── test_pruner.py     # 21 个 unittest 用例（无网络）
+├── .github/workflows/
+│   ├── build-cctv-pruner.yml      # 构建并推送 arm64 镜像
+│   └── prune-cctv.yml             # 派发 + 跟单（由 AWS Scheduler 触发）
 ├── templates/
 │   └── workflow-dispatch-consumer.yml   # 消费者 workflow 模板（复制到执行仓库使用）
 └── scripts/
     └── register-schedule.sh       # 用 aws cli 注册 Schedule + Rule（幂等、带 dry-run）
 ```
+
+> k8s 模板（CronJob + ExternalSecret）仍放在 `my-argocd-manifests`，由 ArgoCD 管；本仓只放实现代码与编排。
 
 ---
 
@@ -131,7 +152,7 @@ flowchart LR
 ## 🔐 安全边界（本仓库刻意不做的事）
 
 - **不放任何凭据**：Token、私钥、连接串一律在 GitHub Secrets / AWS Secrets Manager 里，仓库里只出现**变量的名字**。
-- **不放业务代码**：这里只登记与说明，避免"两处真相"。
+- **只放自研任务的实现，不复制他人代码**：`jobs/` 下的程序在本仓唯一存在；`sms-flink-etl` 等外部业务仍留在各自仓库，本仓只登记，避免"两处真相"。
 - **Connection 而不是明文 header**：API Destination 的定义可被 `describe-*` 读出，所以 PAT 只存在于 Secrets Manager，由 Connection 在运行时注入。
 - **不用 self-hosted runner 跑 public repo**：public repo + self-hosted runner = 任何人 fork 提 PR 就能在你家机器上执行任意代码。本体系一律用 GitHub 托管 runner。
 
