@@ -364,6 +364,51 @@ DRY_RUN=0 ./scripts/register-schedule.sh \
 
 **首晚（RETENTION_DAYS=14）额外人工确认**：打开 PC 客户端回收站，抽查是否有刚删的日期目录，确认可恢复路径存在。
 
+### 9.1 已完成的真实验收（2026-11-26）
+
+**A. 端到端 dry-run（集群内，真实 AList）**
+
+```bash
+# 从挂起的模板派生，强制 DRY_RUN=true
+kubectl create job --from=cronjob/cctv-prune cctv-prune-dryrun-<ts> -n cctv-system --dry-run=client -o json \
+ | jq '.spec.template.spec.containers[0].env |= map(select(.name!="DRY_RUN")) + [{"name":"DRY_RUN","value":"true"}]' \
+ | kubectl apply -f -
+```
+
+结果：`job 1/0`、`pod Succeeded`、调度到 `radxa-cubie-a7a`、无需 `imagePullSecrets`。
+
+```
+cctv-pruner  target=/Quark/CCTV_Records/锦绣世家_客厅
+             today=2026-11-26  retention=7d  dry_run=True  max_dirs=40
+✅ AList 登录成功（用户 cctv-pruner）
+发现 42 个符合 YYYY-MM-DD 的目录
+cutoff=2026-11-20（保留 11-20 … 11-26）  待删 35 天
+合计 3229 文件 / 434.22 GB
+[DRY_RUN] 以上目录将被删除（本次未做任何改动）
+```
+
+证明：arm64 镜像可运行、公开包可匿名拉取、ESO→Secret→env 链路有效、
+专用用户权限足够、四道守卫与清单输出符合预期、出口 IP 与 AList 一致。
+
+**B. CI/CD 全链路**
+
+| 环节 | 证据 |
+|---|---|
+| 测试闸门 | run `45630525503`：`Unit tests` 通过（21 用例）后才构建 |
+| 镜像 | `ghcr.io/nvd11/cctv-pruner`，匿名拉取 HTTP 200，`linux/arm64` |
+| digest 回写 | `sha256:d840cdfd…` 写入 `argocd-apps/cctv-prune-app.yaml` |
+| 同步延迟 | root-bootstrap → Application → CronJob 实测 **3~5 分钟** |
+| 最终产物 | CronJob image = `ghcr.io/nvd11/cctv-pruner@sha256:d840cdfd…` |
+
+**C. 数据基线（供后续对比）**
+
+| 日期 | 目录数 | 待删 | 体积 |
+|---|---|---|---|
+| 2026-11-25 | 41 | 34 天 | 420.93 GB |
+| 2026-11-26 | 42 | 35 天 | 434.22 GB |
+
+→ 无清理时**每天约 +13 GB**，与单日录像体量吻合。
+
 ---
 
 ## 10. 回滚 / 误删恢复
@@ -389,7 +434,7 @@ DRY_RUN=0 ./scripts/register-schedule.sh \
 | 8 | ~~构建镜像 `ghcr.io/nvd11/cctv-pruner` + workflow~~ | ✅ 代码与 workflow 已写（`jobs/cctv-pruner/`），待 push 触发构建 |
 | 9 | 本仓新增 secrets `K3S_SSH_HOST` / `K3S_SSH_USER` / `K3S_SSH_PRIVATE_KEY` | ⏭ 待配置 |
 | 10 | push 后把 Application 的镜像 tag 从 `v0.1.0` 换成实际 digest | ⏭ 待构建完成 |
-| 11 | 手工派生 `DRY_RUN=true` 的 Job，在真实集群验证一轮 | ⏭ 待镜像 |
+| 11 | ~~手工派生 `DRY_RUN=true` 的 Job，在真实集群验证一轮~~ | ✅ 2026-11-26 通过（见 §9.1） |
 | 12 | AWS 侧接线：API Destination / Rule / Schedule | ⏭ 待验证通过 |
 | 10 | 排查 `default/oci-vault-store` 曾报 `InvalidProviderConfig`、`scheduler-backend` 在 radxa 上 CrashLoopBackOff 1367 次 | 独立问题，另行处理 |
 | 6 | **探测夸克是否有“彻底删除/跳过回收站”参数**（路线 C）；若有，任务二可取消 | 待验证 |
