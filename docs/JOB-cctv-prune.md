@@ -423,6 +423,29 @@ cutoff=2026-11-20（保留 11-20 … 11-26）  待删 35 天
 
 → 无清理时**每天约 +13 GB**，与单日录像体量吻合。
 
+**D. AWS 链路验证（2026-11-26 17:18 UTC）**
+
+不等到次日 04:20，直接向 default bus 投一条同源同类型事件，验证 Rule → API Destination → GitHub 这一环：
+
+```bash
+# 投递（等价于每天 04:20 Scheduler 的动作）
+aws events put-events --entries '[{
+  "Source":"custom.cctv",
+  "DetailType":"prune-daily",
+  "Detail":"{\"action\":\"prune-daily\",\"_test\":true}"
+}]'
+```
+
+| 时刻（UTC） | 事件 |
+|---|---|
+| 17:18:48 | PutEvents → `FailedEntryCount=0`，`EventId=4c80a54a…` |
+| 17:18:51 | GitHub run `45866665598` 被创建（`event=workflow_dispatch`） |
+| 17:19:04 | 派生 `cctv-prune-true-20261126171900`（`dry_run=true, retention=7d`） |
+| 17:20 前 | 6 个步骤全绿，Job 输出 `36 天 / 448.34 GB / [DRY_RUN]` |
+
+结论：**Rule 匹配、Destination 投递、workflow 参数解析、SSH、派生 Job、ESO 注入、清理逻辑全部实测通过。**
+唯一未经实跑的是「Scheduler 在 04:20 自然触发」——其 cron/时区/状态已由 `GetSchedule` 核对，且与上述链路共用同一个 Rule + Destination。
+
 ---
 
 ## 10. 回滚 / 误删恢复
@@ -449,7 +472,7 @@ cutoff=2026-11-20（保留 11-20 … 11-26）  待删 35 天
 | 9 | 本仓新增 secrets `K3S_SSH_HOST` / `K3S_SSH_USER` / `K3S_SSH_PRIVATE_KEY` | ⏭ 待配置 |
 | 10 | push 后把 Application 的镜像 tag 从 `v0.1.0` 换成实际 digest | ⏭ 待构建完成 |
 | 11 | ~~手工派生 `DRY_RUN=true` 的 Job，在真实集群验证一轮~~ | ✅ 2026-11-26 通过（见 §9.1） |
-| 12 | AWS 侧接线：API Destination / Rule / Schedule | ⏭ 待验证通过 |
+| 12 | ~~AWS 侧接线：API Destination / Rule / Schedule~~ | ✅ 已建 + 端到端验证（见 §9.1 D） |
 | 10 | 排查 `default/oci-vault-store` 曾报 `InvalidProviderConfig`、`scheduler-backend` 在 radxa 上 CrashLoopBackOff 1367 次 | 独立问题，另行处理 |
 | 6 | **探测夸克是否有“彻底删除/跳过回收站”参数**（路线 C）；若有，任务二可取消 | 待验证 |
 | 7 | 任务二 `quark-recycle-purge-weekly` 上线时间 | 任务一稳定两周后 |
