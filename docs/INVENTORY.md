@@ -13,6 +13,7 @@
 | 4 | `sms-flink-report-monthly` | `cron(30 9 1 * ? *)` | Asia/Shanghai | `finance.sms-flink-report` / `monthly-report` | `rule-trigger-github-monthly-report` | `github-trigger-nuc-batch` | `sms-flink-etl` · `trigger-nuc-batch-runner.yml` |
 | 5 | `sms-flink-lakehouse-maintain` | `cron(0 4 * * ? *)` | Asia/Shanghai | `finance.sms-flink-maintain` / `lakehouse-maintain` | `rule-trigger-github-lakehouse-maintain` | `github-trigger-lakehouse-maintain` | `sms-flink-etl` · `maintain-lakehouse.yml` |
 | 6 | `jppwl-tls-cert-renew-weekly` | `cron(0 4 ? * SUN *)` | Asia/Shanghai | `infra.tls-cert` / `renew-jppwl-tls` | `rule-trigger-github-tls-renew` | `github-trigger-tls-renew` | `my-argocd-manifests` · `renew-jppwl-tls.yml` |
+| 7 | `cctv-prune-daily` | `cron(20 4 * * ? *)` | Asia/Shanghai | `custom.cctv` / `prune-daily` | `rule-trigger-github-cctv-prune` | `github-trigger-cctv-prune` | `scheduled-batch-jobs` · `prune-cctv.yml` |
 
 全部 6 个 Schedule 状态 `ENABLED`，`GroupName=default`，`FlexibleTimeWindow=OFF`，`ActionAfterCompletion=NONE`，执行角色 `arn:aws:iam::186004631963:role/eventbridge-scheduler-exec-role`，重试策略统一 `MaximumRetryAttempts=185 / MaximumEventAgeInSeconds=86400`。
 
@@ -69,6 +70,19 @@
 | workflow | `my-argocd-manifests/.github/workflows/renew-jppwl-tls.yml` |
 | 目标对象 | `default/jppwl-asia-tls`（Kong 网关证书） |
 
+### 7. `cctv-prune-daily`
+
+| 字段 | 值 |
+|---|---|
+| 用途 | 夸克网盘上的 CCTV 录像只保留最近 N 天，清掉更早的日期目录（详见 `docs/JOB-cctv-prune.md`） |
+| Schedule Target Input | `{"action":"prune-daily"}` |
+| Rule → Destination body | `{"ref":"main","inputs":{"dry_run":"true","retention_days":"7"}}` ← **当前为 dry-run** |
+| workflow | `scheduled-batch-jobs/.github/workflows/prune-cctv.yml` |
+| 执行体 | 派生 `cctv-system/cctv-prune-*` Job（模板 `CronJob cctv-prune`，suspend），pod 落 radxa |
+| 归档 | `docs/JOB-cctv-prune.md`、`docs/CICD-STRATEGY.md` |
+
+> 上线节奏：先跑若干天 `dry_run=true` 观察清单，确认后把 input 改为 `"false"` 并把 `retention_days` 设为 `14`，次日再收到 `7`。
+
 ---
 
 ## 共用资源
@@ -87,3 +101,4 @@
 | 日期 | 变更 |
 |---|---|
 | 2026-11-23 | 建仓，首次登记 6 个在跑任务（实测核对） |
+| 2026-11-26 | 新增第 7 个任务 `cctv-prune-daily`（AWS 侧已建 Destination / Rule / Target / Schedule；先以 `dry_run=true` 空跑观察） |

@@ -351,6 +351,20 @@ DRY_RUN=0 ./scripts/register-schedule.sh \
 
 ⚠️ `inputs` 键名必须与 workflow 声明逐字一致，否则 422 只在 EventBridge 指标里静默出现。
 
+### 8.1 已创建（2026-11-26 实测）
+
+| 对象 | 值 |
+|---|---|
+| API Destination | `github-trigger-cctv-prune`<br>`arn:aws:events:ap-southeast-1:186004631963:api-destination/github-trigger-cctv-prune/507fefc7-4858-4f79-a3bc-8280af889bec` |
+| Connection | 复用 `github-api-conn`（`AUTHORIZED`） |
+| Rule | `rule-trigger-github-cctv-prune`（`custom.cctv` / `prune-daily`） |
+| Target Input | `{"ref":"main","inputs":{"dry_run":"true","retention_days":"7"}}` ← **先空跑** |
+| Schedule | `cctv-prune-daily` · `cron(20 4 * * ? *)` · Asia/Shanghai · `FlexibleTimeWindow=OFF` · `ActionAfterCompletion=NONE` |
+| 角色 | `arn:aws:iam::186004631963:role/eventbridge-scheduler-exec-role` |
+| 重试 | `MaximumRetryAttempts=185` / `MaximumEventAgeInSeconds=86400` |
+
+**切换为真删**：把 Rule target 的 `Input` 改成 `{"ref":"main","inputs":{"dry_run":"false","retention_days":"14"}}`，观察一晚后再把 `retention_days` 降到 `7`。
+
 ---
 
 ## 9. 验收清单（每晚必看）

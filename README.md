@@ -89,6 +89,7 @@ flowchart LR
 | 4 | `sms-flink-report-monthly` | `30 9 1 * ? *` | Asia/Shanghai | `sms-flink-etl` → `nuc-batch-runner`（MONTHLY） |
 | 5 | `sms-flink-lakehouse-maintain` | `0 4 * * ? *` | Asia/Shanghai | `sms-flink-etl` → `maintain-lakehouse.yml` |
 | 6 | `jppwl-tls-cert-renew-weekly` | `0 4 ? * SUN *` | Asia/Shanghai | `my-argocd-manifests` → `renew-jppwl-tls.yml` |
+| 7 | `cctv-prune-daily` | `20 4 * * ? *` | Asia/Shanghai | `scheduled-batch-jobs` → `prune-cctv.yml`（当前 `dry_run=true`） |
 
 > 清单以 AWS 侧实测为准，核对于 2026-11-23。任何新增/下线任务必须同步更新 `docs/INVENTORY.md`。
 
