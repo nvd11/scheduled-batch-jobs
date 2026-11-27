@@ -1,0 +1,109 @@
+# 派发 demo-email：从挂起的 CronJob 模板派生一个真实 Job 并发信。
+# 需要仓库 secrets：K3S_SSH_HOST / K3S_SSH_USER / K3S_SSH_PRIVATE_KEY
+name: "Demo Email"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run（只打印邮件内容，不发送）"
+        required: false
+        default: "false"
+        type: choice
+        options: ["true", "false"]
+
+concurrency:
+  group: scheduled-demo-email
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    name: Dispatch and follow up
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SSH_HOST: ${{ secrets.K3S_SSH_HOST }}
+      SSH_USER: ${{ secrets.K3S_SSH_USER }}
+      SSH_KEY: ${{ secrets.K3S_SSH_PRIVATE_KEY }}
+      NAMESPACE: default
+      CRONJOB: demo-email
+      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+
+    steps:
+      - name: Prepare SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          cat >> ~/.ssh/config <<EOF
+          Host k3s
+            HostName ${SSH_HOST}
+            User ${SSH_USER}
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ControlMaster auto
+            ControlPath ~/.ssh/cm-%r@%h:%p
+            ControlPersist 10m
+            ServerAliveInterval 15
+          EOF
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Create job from suspended template
+        id: dispatch
+        run: |
+          set -euo pipefail
+          JOB="demo-email-${DRY_RUN}-$(date -u +%Y%m%d%H%M%S)"
+          echo "job_name=${JOB}" >> "$GITHUB_OUTPUT"
+
+          ssh k3s "sudo kubectl create job --from=cronjob/${CRONJOB} ${JOB} -n ${NAMESPACE} --dry-run=client -o json" \
+            | jq --arg dr "$DRY_RUN" '
+                .spec.template.spec.containers[0].env =
+                  ((.spec.template.spec.containers[0].env // []) | map(select(.name != "DRY_RUN")))
+                  + [{"name":"DRY_RUN","value":$dr}]
+              ' > /tmp/job.json
+
+          ssh k3s "sudo kubectl apply -f -" < /tmp/job.json
+          echo "✅ 已派生 Job: ${JOB} (dry_run=${DRY_RUN})"
+
+      - name: Poll until finished
+        run: |
+          set -euo pipefail
+          JOB="${{ steps.dispatch.outputs.job_name }}"
+          seen=0; missing=0
+          for i in $(seq 1 60); do
+            S=$(ssh k3s "sudo kubectl get job ${JOB} -n ${NAMESPACE} -o jsonpath='{.status.succeeded}{\"/\"}{.status.failed}' 2>/dev/null || true")
+            case "$S" in
+              1/*) echo "🎉 Job ${JOB} 成功"; exit 0 ;;
+              0/[1-9]*) echo "::error::Job ${JOB} 失败 ($S)"; exit 1 ;;
+            esac
+            if [ -n "$S" ]; then seen=1; missing=0
+            elif [ "$seen" -eq 1 ]; then
+              missing=$((missing+1))
+              [ "$missing" -ge 6 ] && { echo "::error::Job ${JOB} 从集群消失"; exit 1; }
+            fi
+            sleep 5
+          done
+          echo "::error::等待 Job ${JOB} 超时"
+          exit 1
+
+      - name: Collect logs
+        if: always()
+        run: |
+          set -euo pipefail
+          JOB="${{ steps.dispatch.outputs.job_name }}"
+          LOGS=$(ssh k3s "sudo kubectl logs -n ${NAMESPACE} -l job-name=${JOB} --tail=500 || true")
+          {
+            echo "### Demo Email 日志（${JOB}）"
+            echo '```text'
+            echo "$LOGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if printf '%s' "$LOGS" | grep -qF '[ALERT]'; then
+            echo "::error::日志中出现业务告警标记 [ALERT]"
+            exit 1
+          fi
