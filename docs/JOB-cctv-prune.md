@@ -358,7 +358,7 @@ DRY_RUN=0 ./scripts/register-schedule.sh \
 | API Destination | `github-trigger-cctv-prune`<br>`arn:aws:events:ap-southeast-1:186004631963:api-destination/github-trigger-cctv-prune/507fefc7-4858-4f79-a3bc-8280af889bec` |
 | Connection | 复用 `github-api-conn`（`AUTHORIZED`） |
 | Rule | `rule-trigger-github-cctv-prune`（`custom.cctv` / `prune-daily`） |
-| Target Input | `{"ref":"main","inputs":{"dry_run":"true","retention_days":"7"}}` ← **先空跑** |
+| Target Input | `{"ref":"main","inputs":{"dry_run":"false","retention_days":"14"}}` ← **2026-11-27 起真删（第一阶段）** |
 | Schedule | `cctv-prune-daily` · `cron(20 4 * * ? *)` · Asia/Shanghai · `FlexibleTimeWindow=OFF` · `ActionAfterCompletion=NONE` |
 | 角色 | `arn:aws:iam::186004631963:role/eventbridge-scheduler-exec-role` |
 | 重试 | `MaximumRetryAttempts=185` / `MaximumEventAgeInSeconds=86400` |

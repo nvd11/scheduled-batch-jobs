@@ -76,7 +76,7 @@
 |---|---|
 | 用途 | 夸克网盘上的 CCTV 录像只保留最近 N 天，清掉更早的日期目录（详见 `docs/JOB-cctv-prune.md`） |
 | Schedule Target Input | `{"action":"prune-daily"}` |
-| Rule → Destination body | `{"ref":"main","inputs":{"dry_run":"true","retention_days":"7"}}` ← **当前为 dry-run** |
+| Rule → Destination body | `{"ref":"main","inputs":{"dry_run":"false","retention_days":"14"}}` ← **2026-11-27 起真删，第一阶段保留 14 天** |
 | workflow | `scheduled-batch-jobs/.github/workflows/prune-cctv.yml` |
 | 执行体 | 派生 `cctv-system/cctv-prune-*` Job（模板 `CronJob cctv-prune`，suspend），pod 落 radxa |
 | 归档 | `docs/JOB-cctv-prune.md`、`docs/CICD-STRATEGY.md` |
@@ -102,3 +102,4 @@
 |---|---|
 | 2026-11-23 | 建仓，首次登记 6 个在跑任务（实测核对） |
 | 2026-11-26 | 新增第 7 个任务 `cctv-prune-daily`（AWS 侧已建 Destination / Rule / Target / Schedule；先以 `dry_run=true` 空跑观察） |
+| 2026-11-27 | 04:20 自然触发验证通过；同日切换为真删第一阶段（`dry_run=false`, `retention_days=14`） |
