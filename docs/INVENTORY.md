@@ -14,6 +14,7 @@
 | 5 | `sms-flink-lakehouse-maintain` | `cron(0 4 * * ? *)` | Asia/Shanghai | `finance.sms-flink-maintain` / `lakehouse-maintain` | `rule-trigger-github-lakehouse-maintain` | `github-trigger-lakehouse-maintain` | `sms-flink-etl` · `maintain-lakehouse.yml` |
 | 6 | `jppwl-tls-cert-renew-weekly` | `cron(0 4 ? * SUN *)` | Asia/Shanghai | `infra.tls-cert` / `renew-jppwl-tls` | `rule-trigger-github-tls-renew` | `github-trigger-tls-renew` | `my-argocd-manifests` · `renew-jppwl-tls.yml` |
 | 7 | `cctv-prune-daily` | `cron(20 4 * * ? *)` | Asia/Shanghai | `custom.cctv` / `prune-daily` | `rule-trigger-github-cctv-prune` | `github-trigger-cctv-prune` | `scheduled-batch-jobs` · `prune-cctv.yml` |
+| 8 | `demo-email-daily` | `cron(0 9 * * ? *)` | Asia/Shanghai | `custom.demo` / `demo-email-daily` | `rule-trigger-github-demo-email` | `github-trigger-demo-email` | `scheduled-batch-jobs` · `demo-email.yml` |
 
 全部 6 个 Schedule 状态 `ENABLED`，`GroupName=default`，`FlexibleTimeWindow=OFF`，`ActionAfterCompletion=NONE`，执行角色 `arn:aws:iam::186004631963:role/eventbridge-scheduler-exec-role`，重试策略统一 `MaximumRetryAttempts=185 / MaximumEventAgeInSeconds=86400`。
 
@@ -83,6 +84,18 @@
 
 > 上线节奏：先跑若干天 `dry_run=true` 观察清单，确认后把 input 改为 `"false"` 并把 `retention_days` 设为 `14`，次日再收到 `7`。
 
+### 8. `demo-email-daily`
+
+| 字段 | 值 |
+|---|---|
+| 用途 | 每天 09:00 往 `nvd11@163.com` 发一封固定格式的演示邮件（验证整条批处理链路） |
+| Schedule Target Input | `{"action":"demo-email-daily"}` |
+| Rule → Destination body | `{"ref":"main","inputs":{"dry_run":"false"}}` |
+| workflow | `scheduled-batch-jobs/.github/workflows/demo-email.yml` |
+| 执行体 | 派生 `default/demo-email-*` Job（模板 `CronJob demo-email`，suspend），pod 落 radxa |
+| 凭据 | 163 授权码来自 OCI Vault `smtp-163-auth-code` → ESO → `default/demo-email-secrets` |
+| 镜像 | `ghcr.io/nvd11/demo-email`（arm64，公开） |
+
 ---
 
 ## 共用资源
@@ -103,3 +116,4 @@
 | 2026-11-23 | 建仓，首次登记 6 个在跑任务（实测核对） |
 | 2026-11-26 | 新增第 7 个任务 `cctv-prune-daily`（AWS 侧已建 Destination / Rule / Target / Schedule；先以 `dry_run=true` 空跑观察） |
 | 2026-11-27 | 04:20 自然触发验证通过；同日切换为真删第一阶段（`dry_run=false`, `retention_days=14`） |
+| 2026-11-28 | 新增第 8 个任务 `demo-email-daily`（每日 09:00 发信 demo，全链路实测通过） |
