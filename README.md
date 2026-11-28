@@ -108,7 +108,8 @@ flowchart LR
 │   ├── RUNBOOK-add-a-job.md       # 新增一个定时任务的完整接线步骤
 │   ├── JOB-cctv-prune.md          # CCTV 保留策略：设计、守卫、节奏、凭据
 │   ├── QUARK-API-NOTES.md         # 夸克 API / Cookie 机制的实测笔记
-│   └── CICD-STRATEGY.md           # CI/CD 与 GitOps 部署策略（构建→镜像→回写→同步）
+│   ├── CICD-STRATEGY.md           # CI/CD 与 GitOps 部署策略（构建→镜像→回写→同步）
+│   └── OPS-NOTES.md               # 运维调优笔记（sysctl 覆盖顺序、swap 语义、内存画像）
 ├── jobs/                          # 自研任务的实现（程序 + Dockerfile + README）
 │   └── cctv-pruner/
 │       ├── pruner.py              # 清理逻辑（仅标准库）
