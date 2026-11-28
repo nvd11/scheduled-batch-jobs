@@ -15,6 +15,7 @@
 | 6 | `jppwl-tls-cert-renew-weekly` | `cron(0 4 ? * SUN *)` | Asia/Shanghai | `infra.tls-cert` / `renew-jppwl-tls` | `rule-trigger-github-tls-renew` | `github-trigger-tls-renew` | `my-argocd-manifests` · `renew-jppwl-tls.yml` |
 | 7 | `cctv-prune-daily` | `cron(20 4 * * ? *)` | Asia/Shanghai | `custom.cctv` / `prune-daily` | `rule-trigger-github-cctv-prune` | `github-trigger-cctv-prune` | `scheduled-batch-jobs` · `prune-cctv.yml` |
 | 8 | `demo-email-daily` | `cron(0 9 * * ? *)` | Asia/Shanghai | `custom.demo` / `demo-email-daily` | `rule-trigger-github-demo-email` | `github-trigger-demo-email` | `scheduled-batch-jobs` · `demo-email.yml` |
+| 9 | `demo-email-java-daily` | `cron(5 9 * * ? *)` | Asia/Shanghai | `custom.demo` / `demo-email-java-daily` | `rule-trigger-github-demo-email-java` | `github-trigger-demo-email-java` | `scheduled-batch-jobs` · `demo-email-java.yml` |
 
 全部 6 个 Schedule 状态 `ENABLED`，`GroupName=default`，`FlexibleTimeWindow=OFF`，`ActionAfterCompletion=NONE`，执行角色 `arn:aws:iam::186004631963:role/eventbridge-scheduler-exec-role`，重试策略统一 `MaximumRetryAttempts=185 / MaximumEventAgeInSeconds=86400`。
 
@@ -96,6 +97,18 @@
 | 凭据 | 163 授权码来自 OCI Vault `smtp-163-auth-code` → ESO → `default/demo-email-secrets` |
 | 镜像 | `ghcr.io/nvd11/demo-email`（arm64，公开） |
 
+### 9. `demo-email-java-daily`
+
+| 字段 | 值 |
+|---|---|
+| 用途 | 同 8，但改用 **Java** 实现（Maven + jakarta.mail），验证同一流水线可承载不同语言/构建体系 |
+| Schedule Target Input | `{"action":"demo-email-java-daily"}` |
+| Rule → Destination body | `{"ref":"main","inputs":{"dry_run":"false"}}` |
+| workflow | `scheduled-batch-jobs/.github/workflows/demo-email-java.yml` |
+| 执行体 | 派生 `default/demo-email-java-*` Job（模板 `CronJob demo-email-java`，suspend），pod 落 radxa |
+| 凭据 | 复用 `default/demo-email-secrets`（同一份 163 授权码） |
+| 镜像 | `ghcr.io/nvd11/demo-email-java`（arm64，公开，多阶段构建 Maven → JRE alpine） |
+
 ---
 
 ## 共用资源
@@ -117,3 +130,4 @@
 | 2026-11-26 | 新增第 7 个任务 `cctv-prune-daily`（AWS 侧已建 Destination / Rule / Target / Schedule；先以 `dry_run=true` 空跑观察） |
 | 2026-11-27 | 04:20 自然触发验证通过；同日切换为真删第一阶段（`dry_run=false`, `retention_days=14`） |
 | 2026-11-28 | 新增第 8 个任务 `demo-email-daily`（每日 09:00 发信 demo，全链路实测通过） |
+| 2026-11-28 | 新增第 9 个任务 `demo-email-java-daily`（每日 09:05，Java 版，全链路实测通过） |

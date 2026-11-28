@@ -90,7 +90,8 @@ flowchart LR
 | 5 | `sms-flink-lakehouse-maintain` | `0 4 * * ? *` | Asia/Shanghai | `sms-flink-etl` → `maintain-lakehouse.yml` |
 | 6 | `jppwl-tls-cert-renew-weekly` | `0 4 ? * SUN *` | Asia/Shanghai | `my-argocd-manifests` → `renew-jppwl-tls.yml` |
 | 7 | `cctv-prune-daily` | `20 4 * * ? *` | Asia/Shanghai | `scheduled-batch-jobs` → `prune-cctv.yml`（真删，保留 14 天） |
-| 8 | `demo-email-daily` | `0 9 * * ? *` | Asia/Shanghai | `scheduled-batch-jobs` → `demo-email.yml`（每天发信到 163） |
+| 8 | `demo-email-daily` | `0 9 * * ? *` | Asia/Shanghai | `scheduled-batch-jobs` → `demo-email.yml`（Python 版发信） |
+| 9 | `demo-email-java-daily` | `5 9 * * ? *` | Asia/Shanghai | `scheduled-batch-jobs` → `demo-email-java.yml`（Java 版发信） |
 
 > 清单以 AWS 侧实测为准，核对于 2026-11-23。任何新增/下线任务必须同步更新 `docs/INVENTORY.md`。
 
